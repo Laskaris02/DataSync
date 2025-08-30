@@ -506,7 +506,7 @@ app.get('/api/customers', async (req, res) => {
         chassisnum, enginenum, cc, manufacture, typeofbody,
         financier, hypothecation, requestingdealer, requestingsubdealer,
         previousinsname, previnsno, bookingdate, invoicedate, registrationdate,
-        status, assignedto, updatedby, notes, processingstatus,
+        status, assignedto, updatedby, notes,
         created_at, updated_at
       FROM customers
     `;
