@@ -499,15 +499,9 @@ app.get('/api/customers', async (req, res) => {
     
     let query = `
       SELECT 
-        id, firstname, mobilenumber, city, state, pincode,
-        customeremailaddress, contactperson, gender, relativename,
-        addressline1, addressline2, pincity, pinstate, pincodepin,
-        registrationnum, vehiclemake, vehmodel, modelvariant, color,
-        chassisnum, enginenum, cc, manufacture, typeofbody,
-        financier, hypothecation, requestingdealer, requestingsubdealer,
-        previousinsname, previnsno, bookingdate, invoicedate, registrationdate,
-        status, assignedto, updatedby, notes,
-        created_at, updated_at
+        id, firstname, mobilenumber, city, state,
+        customeremailaddress, registrationnum, vehiclemake, 
+        vehmodel, created_at, updated_at
       FROM customers
     `;
     const conditions = [];
