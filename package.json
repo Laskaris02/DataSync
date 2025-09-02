@@ -1,5 +1,5 @@
 {
-  "name": "insurance-admin-api",
+  "name": "insurance-admin-backend",
   "version": "1.0.0",
   "type": "module",
   "main": "server.js",
@@ -9,7 +9,6 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "build": "echo 'API server - no build step needed'",
     "test": "echo 'Tests not configured'"
   },
   "dependencies": {
