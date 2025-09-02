@@ -9,11 +9,21 @@ import { dirname } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Load environment variables - production first, then local fallback
-if (process.env.NODE_ENV === 'production') {
-  dotenv.config({ path: '.env.production' });
+// Load environment variables from single .env file
+dotenv.config();
+
+// Set environment-specific variables based on NODE_ENV
+const isProduction = process.env.NODE_ENV === 'production';
+
+// Override environment-specific settings
+if (isProduction) {
+  process.env.CORS_ORIGINS = process.env.PROD_CORS_ORIGINS || process.env.CORS_ORIGINS;
+  process.env.LOG_LEVEL = process.env.PROD_LOG_LEVEL || process.env.LOG_LEVEL;
+  process.env.WEBSITE_NODE_DEFAULT_VERSION = process.env.PROD_WEBSITE_NODE_DEFAULT_VERSION;
 } else {
-  dotenv.config({ path: '.env.local' });
+  process.env.CORS_ORIGINS = process.env.DEV_CORS_ORIGINS || process.env.CORS_ORIGINS;
+  process.env.LOG_LEVEL = process.env.DEV_LOG_LEVEL || process.env.LOG_LEVEL;
+  process.env.VITE_DEV_MODE = process.env.DEV_VITE_DEV_MODE || process.env.VITE_DEV_MODE;
 }
 
 const app = express();
@@ -288,7 +298,7 @@ app.get('/api/admin/metrics/overview', async (req, res) => {
     
     const stateResult = await pool.request().query(stateQuery);
     
-    // Get user metrics  
+    // Get user metrics using customer_allocations table first, fallback to legacy
     const userQuery = `
       SELECT TOP 10
         u.username,
@@ -296,11 +306,22 @@ app.get('/api/admin/metrics/overview', async (req, res) => {
         u.last_name,
         u.location_state,
         u.user_role,
-        COUNT(c.assigned_to) as linked_customers
+        ISNULL(ca_count.allocation_count, 0) + ISNULL(legacy_count.legacy_count, 0) as linked_customers
       FROM app_users u
-      LEFT JOIN customers c ON c.assigned_to = u.id
-      GROUP BY u.id, u.username, u.first_name, u.last_name, u.location_state, u.user_role
-      ORDER BY COUNT(c.assigned_to) DESC
+      LEFT JOIN (
+        SELECT user_id, COUNT(*) as allocation_count
+        FROM customer_allocations
+        GROUP BY user_id
+      ) ca_count ON ca_count.user_id = u.id
+      LEFT JOIN (
+        SELECT assigned_to, COUNT(*) as legacy_count
+        FROM customers
+        WHERE assigned_to IS NOT NULL
+        GROUP BY assigned_to
+      ) legacy_count ON legacy_count.assigned_to = u.id
+      WHERE u.user_role = 'USER'
+      GROUP BY u.id, u.username, u.first_name, u.last_name, u.location_state, u.user_role, ca_count.allocation_count, legacy_count.legacy_count
+      ORDER BY (ISNULL(ca_count.allocation_count, 0) + ISNULL(legacy_count.legacy_count, 0)) DESC
     `;
     
     const userResult = await pool.request().query(userQuery);
@@ -499,9 +520,14 @@ app.get('/api/customers', async (req, res) => {
     
     let query = `
       SELECT 
-        id, firstname, mobilenumber, city, state,
-        customeremailaddress, registrationnum, vehiclemake, 
-        vehmodel, created_at, updated_at
+        id, firstname, mobilenumber, city, state, pincode, address,
+        customeremailaddress, contactperson, pincity, pinstate, pincodepin,
+        fromleaddata, gender, relativename, addressline1, addressline2,
+        bookingdate, invoicedate, registrationnum, vehiclemake, vehmodel,
+        modelvariant, color, chassisnum, enginenum, financier, hypothecation,
+        requestingdealer, cc, previousinsname, previnsno, requestingsubdealer,
+        requestingstate, requestingregion, requestingcity, manufacture,
+        requestingrto, typeofbody, registrationdate, created_at, updated_at
       FROM customers
     `;
     const conditions = [];
@@ -578,48 +604,11 @@ app.get('/api/mobile/customers/allocated', async (req, res) => {
     // Try customer_allocations table first, fallback to customers.assigned_to
     let query, result, totalCount;
     
-    try {
-      // Try Phase 4 allocation system first
-      query = `
-        SELECT 
-          c.id, c.firstname, c.mobilenumber, c.city, c.state,
-          c.customeremailaddress, c.registrationnum, c.vehiclemake, 
-          c.vehmodel, c.created_at, c.updated_at,
-          ca.allocated_at, ca.allocation_status, ca.notes as allocation_notes
-        FROM customer_allocations ca
-        INNER JOIN customers c ON ca.customer_id = c.id
-        WHERE ca.user_id = @userId 
-          AND ca.is_active = 1
-        ORDER BY ca.allocated_at DESC
-        OFFSET @offset ROWS 
-        FETCH NEXT @pageSize ROWS ONLY
-      `;
-      
-      const request = mainPool.request();
-      request.input('userId', sql.Int, tokenData.userId);
-      request.input('offset', sql.Int, (page - 1) * size);
-      request.input('pageSize', sql.Int, size);
-      
-      result = await request.query(query);
-      
-      // Get total count
-      const countQuery = `
-        SELECT COUNT(*) as total
-        FROM customer_allocations ca
-        WHERE ca.user_id = @userId AND ca.is_active = 1
-      `;
-      
-      const countRequest = mainPool.request();
-      countRequest.input('userId', sql.Int, tokenData.userId);
-      const countResult = await countRequest.query(countQuery);
-      totalCount = countResult.recordset[0].total;
-      
-      console.log(`✅ Found ${result.recordset.length} allocated customers via customer_allocations table`);
-      
-    } catch (allocationsError) {
-      console.log('⚠️ customer_allocations table not available, using customers.assigned_to fallback');
-      
-      // Fallback to customers.assigned_to field
+    // Skip customer_allocations table and use customers.assigned_to directly
+    // This is needed because Phase 4 allocated customers using assigned_to field
+    console.log('🔄 Using customers.assigned_to field directly (Phase 4 compatibility)');
+    
+    // Use customers.assigned_to field
       query = `
         SELECT 
           id, firstname, mobilenumber, city, state,
@@ -654,7 +643,6 @@ app.get('/api/mobile/customers/allocated', async (req, res) => {
       totalCount = countResult.recordset[0].total;
       
       console.log(`✅ Found ${result.recordset.length} allocated customers via customers.assigned_to fallback`);
-    }
     
     res.json({
       success: true,
@@ -858,7 +846,9 @@ app.get('/api/admin/users', async (req, res) => {
         u.user_role, u.location_state, u.location_city, u.mobile_number,
         u.is_active, u.is_locked, u.is_verified, 
         u.created_at, u.updated_at, u.last_login,
-        COUNT(c.assigned_to) as assigned_count
+        COUNT(c.assigned_to) as assigned_count,
+        COUNT(CASE WHEN c.processing_status IN ('COMPLETED', 'CLOSED', 'FINISHED') THEN 1 END) as completed_count,
+        COUNT(CASE WHEN c.updated_at >= CAST(GETDATE() AS DATE) AND c.assigned_to = u.id THEN 1 END) as updated_today
       FROM app_users u
       LEFT JOIN customers c ON c.assigned_to = u.id
     `;
@@ -1205,6 +1195,65 @@ app.post('/api/admin/users/sync', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to synchronize users'
+    });
+  }
+});
+
+/**
+ * GET /api/debug/assignments
+ * Debug endpoint to check user assignments
+ */
+app.get('/api/debug/assignments', async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    
+    // Check customers.assigned_to
+    const assignedQuery = `
+      SELECT 
+        assigned_to as user_id, COUNT(*) as count
+      FROM customers 
+      WHERE assigned_to IS NOT NULL 
+        AND assigned_to != ''
+      GROUP BY assigned_to
+      ORDER BY assigned_to
+    `;
+    
+    const assignedResult = await pool.request().query(assignedQuery);
+    
+    // Check customer_allocations
+    const allocationsQuery = `
+      SELECT 
+        user_id, COUNT(*) as count
+      FROM customer_allocations
+      GROUP BY user_id
+      ORDER BY user_id
+    `;
+    
+    const allocationsResult = await pool.request().query(allocationsQuery);
+    
+    // Check users
+    const usersQuery = `
+      SELECT id, username, location_state
+      FROM app_users
+      WHERE is_active = 1
+      ORDER BY id
+    `;
+    
+    const usersResult = await pool.request().query(usersQuery);
+    
+    res.json({
+      success: true,
+      data: {
+        customers_assigned_to: assignedResult.recordset,
+        customer_allocations: allocationsResult.recordset,
+        active_users: usersResult.recordset
+      }
+    });
+  } catch (error) {
+    console.error('Debug assignments error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });
